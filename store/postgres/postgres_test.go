@@ -11,16 +11,20 @@ import (
 )
 
 var (
-	client = "192.168.99.102:5432"
+	client   = "192.168.99.102:5432"
+	user     = "testuser"
+	password = "testpasswd"
+	bucket   = "testdb"
 )
 
 func makePostgresClient(t *testing.T) store.Store {
 	kv, err := New(
 		[]string{client},
 		&store.Config{
-			ConnectionTimeout: 3 * time.Second,
-			Username:          "postgres",
-			Password:          "postgres",
+			ConnectionTimeout: 1 * time.Second,
+			Bucket:            bucket,
+			Username:          user,
+			Password:          password,
 		},
 	)
 
@@ -36,8 +40,9 @@ func TestRegister(t *testing.T) {
 
 	kv, err := libkv.NewStore(store.POSTGRES, []string{client}, &store.Config{
 		ConnectionTimeout: 3 * time.Second,
-		Username:          "postgres",
-		Password:          "postgres",
+		Bucket:            bucket,
+		Username:          user,
+		Password:          password,
 	})
 	assert.NoError(t, err)
 	assert.NotNil(t, kv)

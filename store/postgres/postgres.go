@@ -32,8 +32,6 @@ func Register() {
 func New(addrs []string, options *store.Config) (store.Store, error) {
 
 	args := []string{}
-	args = append(args, fmt.Sprintf("host=%s", addrs[0]))
-
 	if len(addrs) != 1 {
 		return nil, fmt.Errorf("Invalid DB Address")
 	}
@@ -52,7 +50,7 @@ func New(addrs []string, options *store.Config) (store.Store, error) {
 	if options != nil {
 		if options.Username != "" {
 			args = append(args, fmt.Sprintf("user=%s", options.Username))
-			args = append(args, fmt.Sprintf("password=%s", options.Username))
+			args = append(args, fmt.Sprintf("password=%s", options.Password))
 		}
 
 		if options.Bucket != "" {
