@@ -115,8 +115,6 @@ func toKVPair(kv *KV) *store.KVPair {
 
 func timeToUint64(t time.Time) uint64 {
 
-	// TODO: double check on type conversion
-	// this fails on year 2262
 	return uint64(t.UnixNano())
 }
 
@@ -126,44 +124,73 @@ func (p *Postgres) normalize(key string) string {
 }
 
 // Put a value at the specified key
-func (p *Postgres) Put(key string, value []byte, options *store.WriteOptions) error {
+func (p *Postgres) Put(key string, value []byte, options *store.WriteOptions) (err error) {
 
 	pair := KV{
 		Key:   p.normalize(key),
 		Value: value,
 	}
-	log.Printf("put %s=%s into db\n", pair.Key, pair.Value)
+	// log.Printf("put %s=%s into db\n", pair.Key, pair.Value)
 
-	if err := p.db.Create(&pair).Error; err != nil {
-		// TODO: Create and Update => Upsert ?
-		// if err := p.db.Update(&pair).Error; err != nil {
-		return err
+	tx := p.db.Begin()
+	defer func() {
+		// TODO: double check
+		if err != nil {
+			tx.Rollback()
+		} else {
+			tx.Commit()
+		}
+	}()
+
+	exist, errExist := p.exists(tx, pair.Key)
+	if errExist != nil {
+		err = errExist
+		return
 	}
-	return nil
+	if !exist {
+		err = tx.Create(&pair).Error
+	} else {
+		err = tx.Save(&pair).Error
+	}
+	return
+}
+
+func (p *Postgres) get(tx *gorm.DB, key string) (*KV, error) {
+
+	pair := KV{
+		Key: p.normalize(key),
+	}
+
+	//// SELECT * FROM kvpair WHERE key = 'string_primary_key' LIMIT 1;
+	err := tx.First(&pair, "key = ?", p.normalize(key)).Error
+	if err == gorm.ErrRecordNotFound {
+		// log.Printf("get %s not found", pair.Key)
+		return nil, store.ErrKeyNotFound
+	}
+	// log.Printf("get %s=%s from db\n", pair.Key, pair.Value)
+	return &pair, nil
 }
 
 // Get a value given its key
 func (p *Postgres) Get(key string) (*store.KVPair, error) {
 
-	pair := KV{}
-
-	//// SELECT * FROM kvpair WHERE key = 'string_primary_key' LIMIT 1;
-	err := p.db.First(&pair, "key = ?", p.normalize(key)).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil, store.ErrKeyNotFound
+	pair, err := p.get(p.db, key)
+	if err != nil {
+		return nil, err
 	}
-	return toKVPair(&pair), nil
+	return toKVPair(pair), nil
 }
 
 // Delete the value at the specified key
 func (p *Postgres) Delete(key string) error {
 
 	pair := KV{
-		Key: key,
+		Key: p.normalize(key),
 	}
 
+	// log.Printf("delete %s from db\n", pair.Key)
 	//// DELETE FROM kvpair WHERE key = 'string_primary_key';
-	if err := p.db.Delete(&pair, "key = ?", p.normalize(key)).Error; err != nil {
+	if err := p.db.Delete(&pair, "key = ?", pair.Key).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return store.ErrKeyNotFound
 		}
@@ -172,10 +199,8 @@ func (p *Postgres) Delete(key string) error {
 	return nil
 }
 
-// Exists verifies if a Key exists in the store
-func (p *Postgres) Exists(key string) (bool, error) {
-
-	_, err := p.Get(key)
+func (p *Postgres) exists(tx *gorm.DB, key string) (bool, error) {
+	_, err := p.get(tx, key)
 	if err != nil {
 		if err == store.ErrKeyNotFound {
 			return false, nil
@@ -183,6 +208,11 @@ func (p *Postgres) Exists(key string) (bool, error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// Exists verifies if a Key exists in the store
+func (p *Postgres) Exists(key string) (bool, error) {
+	return p.exists(p.db, key)
 }
 
 // Watch for changes on a key
@@ -252,9 +282,7 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 	err = nil
 
 	tx := p.db.Begin()
-
 	defer func() {
-		// TODO: double check
 		if err != nil {
 			tx.Rollback()
 		} else {
@@ -262,11 +290,11 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 		}
 	}()
 
-	pair := KV{
+	pair := &KV{
 		Key:   p.normalize(key),
 		Value: value,
 	}
-	log.Printf("atomic put %s=%s into db\n", pair.Key, pair.Value)
+	// log.Printf("atomic put %s=%s into db\n", pair.Key, pair.Value)
 
 	if previous == nil {
 		// if the pervious doesn't exist, create one
@@ -274,9 +302,9 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 			return
 		}
 	} else {
-
 		// get the current value
-		if err = tx.First(&pair, "key = ?", pair.Key).Error; err != nil {
+		pair, err = p.get(tx, pair.Key)
+		if err != nil {
 			return
 		}
 
@@ -288,11 +316,11 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 
 		// if matched, do the update
 		pair.Value = value
-		if err = tx.Save(&pair).Error; err != nil {
+		if err = tx.Save(pair).Error; err != nil {
 			return
 		}
 	}
-	result = toKVPair(&pair)
+	result = toKVPair(pair)
 	ok = true
 	return
 }
@@ -300,15 +328,16 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 // AtomicDelete atomic delete of a single value
 func (p *Postgres) AtomicDelete(key string, previous *store.KVPair) (ok bool, err error) {
 
-	pair := KV{
+	pair := &KV{
 		Key: p.normalize(key),
 	}
 	ok = false
 	err = nil
 
+	// log.Printf("atomic delete %s from db\n", pair.Key)
+
 	tx := p.db.Begin()
 	defer func() {
-		// TODO: double check
 		if err != nil {
 			tx.Rollback()
 		} else {
@@ -322,16 +351,18 @@ func (p *Postgres) AtomicDelete(key string, previous *store.KVPair) (ok bool, er
 		}
 	} else {
 		// get the current value
-		if err = tx.First(&pair, "key = ?", pair.Key).Error; err != nil {
+		pair, err = p.get(tx, pair.Key)
+		if err != nil {
 			return
 		}
+
 		// if lastIndeices do not matched, return error
 		if timeToUint64(pair.UpdatedAt) != previous.LastIndex {
 			err = store.ErrKeyModified
 			return
 		}
 		// if matched, do the deletion
-		if err = tx.Delete(&pair, "key = ?", pair.Key).Error; err != nil {
+		if err = tx.Delete(pair, "key = ?", pair.Key).Error; err != nil {
 			return
 		}
 	}

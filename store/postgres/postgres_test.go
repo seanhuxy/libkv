@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -58,6 +59,9 @@ func TestPostgresStore(t *testing.T) {
 
 	defer testutils.RunCleanup(t, kv)
 
+	testPutMultipleTimes(t, kv)
+	testAtomicPutMultipleTimes(t, kv)
+
 	testutils.RunTestCommon(t, kv)
 	testutils.RunTestAtomic(t, kv)
 	// testutils.RunTestWatch(t, kv)
@@ -67,4 +71,95 @@ func TestPostgresStore(t *testing.T) {
 	// testutils.RunTestTTL(t, kv, ttlKV)
 }
 
-// test put two times
+func testPutMultipleTimes(t *testing.T, kv store.Store) {
+
+	key := "testPutMulti"
+	value1 := []byte("bar")
+	value2 := []byte("foo")
+
+	failMsg := fmt.Sprintf("Fail key %s", key)
+
+	err := kv.Put(key, value1, nil)
+	assert.NoError(t, err, failMsg)
+
+	pair, err := kv.Get(key)
+	assert.NoError(t, err, failMsg)
+	if assert.NotNil(t, pair, failMsg) {
+		assert.NotNil(t, pair.Value, failMsg)
+	}
+	assert.Equal(t, value1, pair.Value)
+
+	err = kv.Put(key, value2, nil)
+	assert.NoError(t, err, failMsg)
+	pair, err = kv.Get(key)
+	assert.NoError(t, err, failMsg)
+	if assert.NotNil(t, pair, failMsg) {
+		assert.NotNil(t, pair.Value, failMsg)
+	}
+	assert.Equal(t, value2, pair.Value)
+
+	// Delete the key
+	err = kv.Delete(key)
+	assert.NoError(t, err, failMsg)
+
+	// Get should fail
+	pair, err = kv.Get(key)
+	assert.Error(t, err, failMsg)
+	assert.Nil(t, pair, failMsg)
+
+	// Exists should return false
+	ok, err := kv.Exists(key)
+	assert.NoError(t, err, failMsg)
+	assert.False(t, ok, failMsg)
+}
+
+func testAtomicPutMultipleTimes(t *testing.T, kv store.Store) {
+
+	key := "testAtomicPutMulti"
+	value1 := []byte("bar")
+	value2 := []byte("foo")
+	value3 := []byte("zoo")
+
+	failMsg := fmt.Sprintf("Fail key %s", key)
+
+	ok, _, err := kv.AtomicPut(key, value1, nil, nil)
+	assert.True(t, ok, failMsg)
+	assert.NoError(t, err, failMsg)
+
+	pair, err := kv.Get(key)
+	assert.NoError(t, err, failMsg)
+	if assert.NotNil(t, pair, failMsg) {
+		assert.NotNil(t, pair.Value, failMsg)
+	}
+	assert.Equal(t, value1, pair.Value)
+
+	ok, _, err = kv.AtomicPut(key, value2, pair, nil)
+	assert.True(t, ok, failMsg)
+	assert.NoError(t, err, failMsg)
+
+	pair, err = kv.Get(key)
+	assert.NoError(t, err, failMsg)
+	if assert.NotNil(t, pair, failMsg) {
+		assert.NotNil(t, pair.Value, failMsg)
+	}
+	assert.Equal(t, value2, pair.Value)
+
+	// AtomicPut fail if the key exists but no pervious specifiedj
+	ok, _, err = kv.AtomicPut(key, value3, nil, nil)
+	assert.False(t, ok, failMsg)
+	assert.NotNil(t, err, failMsg)
+
+	// Delete the key
+	err = kv.Delete(key)
+	assert.NoError(t, err, failMsg)
+
+	// Get should fail
+	pair, err = kv.Get(key)
+	assert.Error(t, err, failMsg)
+	assert.Nil(t, pair, failMsg)
+
+	// Exists should return false
+	ok, err = kv.Exists(key)
+	assert.NoError(t, err, failMsg)
+	assert.False(t, ok, failMsg)
+}
