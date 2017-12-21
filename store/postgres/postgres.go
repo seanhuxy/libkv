@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/jinzhu/gorm"
 	_ "github.com/jinzhu/gorm/dialects/postgres"
@@ -17,8 +16,7 @@ import (
 type KV struct {
 	Key       string `gorm:"primary_key"`
 	Value     []byte
-	UpdatedAt time.Time
-	CreatedAt time.Time
+	LastIndex uint64
 }
 
 type Postgres struct {
@@ -109,13 +107,8 @@ func toKVPair(kv *KV) *store.KVPair {
 	return &store.KVPair{
 		Key:       kv.Key,
 		Value:     kv.Value,
-		LastIndex: timeToUint64(kv.UpdatedAt),
+		LastIndex: kv.LastIndex,
 	}
-}
-
-func timeToUint64(t time.Time) uint64 {
-
-	return uint64(t.UnixNano())
 }
 
 func (p *Postgres) normalize(key string) string {
@@ -126,49 +119,52 @@ func (p *Postgres) normalize(key string) string {
 // Put a value at the specified key
 func (p *Postgres) Put(key string, value []byte, options *store.WriteOptions) (err error) {
 
-	pair := KV{
-		Key:   p.normalize(key),
-		Value: value,
+	pair := &KV{
+		Key:       p.normalize(key),
+		Value:     value,
+		LastIndex: 0,
 	}
-	// log.Printf("put %s=%s into db\n", pair.Key, pair.Value)
-
+	log.Printf("put key=%v val=%v\n", pair.Key, pair.Value)
 	tx := p.db.Begin()
 	defer func() {
-		// TODO: double check
 		if err != nil {
+			log.Printf("put %s err: %s", pair.Key, err)
 			tx.Rollback()
 		} else {
+			log.Printf("put %s done", pair.Key)
 			tx.Commit()
 		}
 	}()
 
-	exist, errExist := p.exists(tx, pair.Key)
-	if errExist != nil {
-		err = errExist
+	prev, errGet := p.get(tx, pair.Key)
+	if errGet != nil {
+		if errGet != store.ErrKeyNotFound {
+			err = errGet
+			return
+		}
+		// not exists
+		err = tx.Create(&pair).Error
 		return
 	}
-	if !exist {
-		err = tx.Create(&pair).Error
-	} else {
-		err = tx.Save(&pair).Error
-	}
+
+	pair.LastIndex = prev.LastIndex + 1
+	err = tx.Save(&pair).Error
 	return
 }
 
 func (p *Postgres) get(tx *gorm.DB, key string) (*KV, error) {
 
-	pair := KV{
+	pair := &KV{
 		Key: p.normalize(key),
 	}
-
-	//// SELECT * FROM kvpair WHERE key = 'string_primary_key' LIMIT 1;
-	err := tx.First(&pair, "key = ?", p.normalize(key)).Error
+	err := tx.First(pair, "key = ?", pair.Key).Error
 	if err == gorm.ErrRecordNotFound {
 		// log.Printf("get %s not found", pair.Key)
 		return nil, store.ErrKeyNotFound
 	}
 	// log.Printf("get %s=%s from db\n", pair.Key, pair.Value)
-	return &pair, nil
+	log.Printf("get %s=%s; lastIndex=%v\n", pair.Key, pair.Value, pair.LastIndex)
+	return pair, nil
 }
 
 // Get a value given its key
@@ -188,7 +184,7 @@ func (p *Postgres) Delete(key string) error {
 		Key: p.normalize(key),
 	}
 
-	// log.Printf("delete %s from db\n", pair.Key)
+	log.Printf("delete %s from db\n", pair.Key)
 	//// DELETE FROM kvpair WHERE key = 'string_primary_key';
 	if err := p.db.Delete(&pair, "key = ?", pair.Key).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
@@ -263,7 +259,7 @@ func (p *Postgres) DeleteTree(directory string) error {
 	pair := []*KV{}
 	condition := fmt.Sprintf("%s%%", p.normalize(directory))
 
-	//// DELETE FROM kvpair WHERE key = 'string_primary_key';
+	// DELETE FROM kvpair WHERE key = 'string_primary_key';
 	if err := p.db.Delete(&pair, "key LIKE ?", condition).Error; err != nil {
 		if err == gorm.ErrRecordNotFound {
 			return store.ErrKeyNotFound
@@ -281,20 +277,23 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 	result = nil
 	err = nil
 
-	tx := p.db.Begin()
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-		} else {
-			tx.Commit()
-		}
-	}()
-
 	pair := &KV{
 		Key:   p.normalize(key),
 		Value: value,
 	}
-	// log.Printf("atomic put %s=%s into db\n", pair.Key, pair.Value)
+
+	tx := p.db.Begin()
+	defer func() {
+		if err != nil {
+			log.Printf("atomic put key=%s failed: %s", pair.Key, err)
+			tx.Rollback()
+		} else {
+			log.Printf("atomic put key=%s done", pair.Key)
+			tx.Commit()
+		}
+	}()
+
+	log.Printf("atomic put key=%s value=%s\n", pair.Key, pair.Value)
 
 	if previous == nil {
 		// if the pervious doesn't exist, create one
@@ -303,19 +302,21 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 		}
 	} else {
 		// get the current value
-		pair, err = p.get(tx, pair.Key)
-		if err != nil {
+		curr, errGet := p.get(tx, pair.Key)
+		if errGet != nil {
+			err = errGet
 			return
 		}
 
+		log.Printf("CAS compare: key=%s prev=%v  curr=%v ", pair.Key, previous.LastIndex, curr.LastIndex)
 		// if lastIndeices do not matched, return error
-		if timeToUint64(pair.UpdatedAt) != previous.LastIndex {
+		if curr.LastIndex != previous.LastIndex {
 			err = store.ErrKeyModified
 			return
 		}
 
 		// if matched, do the update
-		pair.Value = value
+		pair.LastIndex = curr.LastIndex + 1
 		if err = tx.Save(pair).Error; err != nil {
 			return
 		}
@@ -328,13 +329,11 @@ func (p *Postgres) AtomicPut(key string, value []byte, previous *store.KVPair, o
 // AtomicDelete atomic delete of a single value
 func (p *Postgres) AtomicDelete(key string, previous *store.KVPair) (ok bool, err error) {
 
-	pair := &KV{
-		Key: p.normalize(key),
-	}
+	normalizedKey := p.normalize(key)
 	ok = false
 	err = nil
 
-	// log.Printf("atomic delete %s from db\n", pair.Key)
+	log.Printf("atomic delete key=%s \n", normalizedKey)
 
 	tx := p.db.Begin()
 	defer func() {
@@ -346,23 +345,23 @@ func (p *Postgres) AtomicDelete(key string, previous *store.KVPair) (ok bool, er
 	}()
 
 	if previous == nil {
-		if err = tx.Delete(&pair, "key = ?", pair.Key).Error; err != nil {
+		if err = tx.Delete(&KV{}, "key = ?", normalizedKey).Error; err != nil {
 			return
 		}
 	} else {
 		// get the current value
-		pair, err = p.get(tx, pair.Key)
-		if err != nil {
+		curr, errGet := p.get(tx, normalizedKey)
+		if errGet != nil {
+			err = errGet
 			return
 		}
-
 		// if lastIndeices do not matched, return error
-		if timeToUint64(pair.UpdatedAt) != previous.LastIndex {
+		if curr.LastIndex != previous.LastIndex {
 			err = store.ErrKeyModified
 			return
 		}
 		// if matched, do the deletion
-		if err = tx.Delete(pair, "key = ?", pair.Key).Error; err != nil {
+		if err = tx.Delete(&KV{}, "key = ?", normalizedKey).Error; err != nil {
 			return
 		}
 	}

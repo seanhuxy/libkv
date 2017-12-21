@@ -122,22 +122,16 @@ func testAtomicPutMultipleTimes(t *testing.T, kv store.Store) {
 
 	failMsg := fmt.Sprintf("Fail key %s", key)
 
-	ok, _, err := kv.AtomicPut(key, value1, nil, nil)
+	ok, pair, err := kv.AtomicPut(key, value1, nil, nil)
 	assert.True(t, ok, failMsg)
-	assert.NoError(t, err, failMsg)
-
-	pair, err := kv.Get(key)
 	assert.NoError(t, err, failMsg)
 	if assert.NotNil(t, pair, failMsg) {
 		assert.NotNil(t, pair.Value, failMsg)
 	}
 	assert.Equal(t, value1, pair.Value)
 
-	ok, _, err = kv.AtomicPut(key, value2, pair, nil)
+	ok, pair, err = kv.AtomicPut(key, value2, pair, nil)
 	assert.True(t, ok, failMsg)
-	assert.NoError(t, err, failMsg)
-
-	pair, err = kv.Get(key)
 	assert.NoError(t, err, failMsg)
 	if assert.NotNil(t, pair, failMsg) {
 		assert.NotNil(t, pair.Value, failMsg)
